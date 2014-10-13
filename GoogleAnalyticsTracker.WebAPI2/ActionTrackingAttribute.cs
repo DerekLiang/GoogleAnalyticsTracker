@@ -1,7 +1,12 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Http.Controllers;
+using System.Web.Http.Filters;
 using GoogleAnalyticsTracker.Core;
 
 namespace GoogleAnalyticsTracker.WebApi2 {
@@ -11,6 +16,9 @@ namespace GoogleAnalyticsTracker.WebApi2 {
         private Func<HttpActionContext, bool> _isTrackableAction;
 
         public Tracker Tracker { get; set; }
+
+        TrackingArgument _trackingArgument;
+
 
         public Func<HttpActionContext, bool> IsTrackableAction
         {
@@ -79,7 +87,7 @@ namespace GoogleAnalyticsTracker.WebApi2 {
             IsTrackableAction = isTrackableAction;
         }
 
-        public async override Task OnActionExecutingAsync(HttpActionContext actionContext, CancellationToken cancellationToken)
+        public override void OnActionExecuting(HttpActionContext actionContext)
         {
             if (IsTrackableAction(actionContext))
             {
@@ -89,7 +97,15 @@ namespace GoogleAnalyticsTracker.WebApi2 {
                     requireRequestAndResponse.SetRequestAndResponse(actionContext.Request, actionContext.Response);
                 }
 
-                await OnTrackingAction(actionContext);
+                PrepareTrackingArgument(actionContext).Start();
+            }
+        }
+
+        public override async Task OnActionExecutedAsync(HttpActionExecutedContext actionExecutedContext, CancellationToken cancellationToken)
+        {
+            if (_trackingArgument != null)
+            {
+                await OnTrackingAction(_trackingArgument.Stop());
             }
         }
 
@@ -118,12 +134,58 @@ namespace GoogleAnalyticsTracker.WebApi2 {
             return ActionUrl ?? (request.RequestUri != null ? request.RequestUri.PathAndQuery : "");
         }
 
-        public virtual async Task<TrackingResult> OnTrackingAction(HttpActionContext filterContext)
+        public virtual TrackingArgument PrepareTrackingArgument(HttpActionContext filterContext)
+        {
+            _trackingArgument = new TrackingArgument() {
+                Request= filterContext.Request,
+                ActionName = BuildCurrentActionName(filterContext),
+                ActionUrl = BuildCurrentActionUrl(filterContext),
+                Beacons = new Dictionary<string, string>(),
+            };
+            return _trackingArgument;
+        }
+
+        public virtual async Task<TrackingResult> OnTrackingAction(TrackingArgument trackingArgument)
         {
             return await Tracker.TrackPageViewAsync(
-                filterContext.Request,
-                BuildCurrentActionName(filterContext),
-                BuildCurrentActionUrl(filterContext));
+                trackingArgument.Request,
+                trackingArgument.ActionName,
+                trackingArgument.ActionUrl,
+                trackingArgument.Beacons);
         }
+    }
+
+    public class TrackingArgument
+    {
+        public TrackingArgument()
+        {
+            Stopwatch = new Stopwatch();
+            Beacons = new Dictionary<string, string>();
+        }
+
+        public void Start()
+        {
+            this.Stopwatch.Start();
+        }
+
+        public TrackingArgument Stop()
+        {
+            this.Stopwatch.Stop();
+            Beacons.Add("timingValue", this.Stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture));
+            Beacons.Add("timingCategory", this.ActionName);
+            Beacons.Add("timingVar", this.ActionUrl);
+            Beacons.Add("timingLabel", "Web API Execution Time");
+            return this;
+        }
+
+        public Stopwatch Stopwatch { get; set; }
+
+        public HttpRequestMessage Request { get; set; }
+
+        public string ActionName { get; set; }
+
+        public string ActionUrl { get; set; }
+
+        public Dictionary<string, string> Beacons { get; set; }
     }
 }
